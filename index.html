@@ -1,0 +1,359 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CSV Stock Viewer</title>
+<style>
+  :root {
+    --bg: #f4f6f8;
+    --card: #ffffff;
+    --text: #1f2933;
+    --muted: #6b7280;
+    --accent: #2563eb;
+    --accent-dark: #1e40af;
+    --error-bg: #fef2f2;
+    --error-border: #fca5a5;
+    --error-text: #b91c1c;
+    --border: #e5e7eb;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.5;
+    padding: 32px 16px 64px;
+  }
+  .container { max-width: 860px; margin: 0 auto; }
+  header { text-align: center; margin-bottom: 28px; }
+  header h1 { font-size: 1.6rem; margin-bottom: 6px; }
+  header p { color: var(--muted); font-size: 0.95rem; }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 24px;
+    margin-bottom: 20px;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.04);
+  }
+  /* Upload area */
+  .dropzone {
+    border: 2px dashed var(--border);
+    border-radius: 10px;
+    padding: 36px 20px;
+    text-align: center;
+    cursor: pointer;
+    transition: border-color 0.15s, background 0.15s;
+  }
+  .dropzone:hover, .dropzone.dragover {
+    border-color: var(--accent);
+    background: #eff6ff;
+  }
+  .dropzone strong { color: var(--accent); }
+  .dropzone .hint { display: block; margin-top: 6px; color: var(--muted); font-size: 0.85rem; }
+  #fileInput { display: none; }
+  #fileName { margin-top: 12px; font-size: 0.9rem; color: var(--muted); text-align: center; }
+  /* Error box */
+  #errorBox {
+    display: none;
+    background: var(--error-bg);
+    border: 1px solid var(--error-border);
+    color: var(--error-text);
+    border-radius: 10px;
+    padding: 14px 18px;
+    margin-bottom: 20px;
+    font-size: 0.95rem;
+    white-space: pre-wrap;
+  }
+  /* Stats */
+  .stats {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+    gap: 14px;
+  }
+  .stat {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px;
+  }
+  .stat .label { font-size: 0.8rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+  .stat .value { font-size: 1.25rem; font-weight: 600; margin-top: 4px; word-break: break-word; }
+  /* Chart */
+  #chartSection { display: none; }
+  #chartSection h2 { font-size: 1.05rem; margin-bottom: 12px; }
+  canvas { width: 100%; height: 360px; display: block; }
+  #statsSection { display: none; }
+</style>
+</head>
+<body>
+<div class="container">
+  <header>
+    <h1>CSV Stock Viewer</h1>
+    <p>Upload a CSV with <code>Date</code> and <code>Close</code> columns (e.g. AAPL daily OHLCV) to see quick stats and a price chart.</p>
+  </header>
+
+  <div class="card">
+    <div id="dropzone" class="dropzone">
+      <strong>Click to choose a CSV file</strong> or drag &amp; drop it here
+      <span class="hint">Everything runs in your browser — no upload, no server, no API keys.</span>
+    </div>
+    <input type="file" id="fileInput" accept=".csv,text/csv">
+    <div id="fileName"></div>
+  </div>
+
+  <div id="errorBox" role="alert"></div>
+
+  <div id="statsSection">
+    <div class="stats">
+      <div class="stat"><div class="label">Rows</div><div class="value" id="statRows">–</div></div>
+      <div class="stat"><div class="label">Date range</div><div class="value" id="statRange">–</div></div>
+      <div class="stat"><div class="label">Close mean</div><div class="value" id="statMean">–</div></div>
+      <div class="stat"><div class="label">Close min</div><div class="value" id="statMin">–</div></div>
+      <div class="stat"><div class="label">Close max</div><div class="value" id="statMax">–</div></div>
+    </div>
+  </div>
+
+  <div class="card" id="chartSection" style="margin-top:20px;">
+    <h2>Close price over time</h2>
+    <canvas id="chart"></canvas>
+  </div>
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  var dropzone = document.getElementById("dropzone");
+  var fileInput = document.getElementById("fileInput");
+  var fileName = document.getElementById("fileName");
+  var errorBox = document.getElementById("errorBox");
+  var statsSection = document.getElementById("statsSection");
+  var chartSection = document.getElementById("chartSection");
+  var canvas = document.getElementById("chart");
+
+  var currentData = null;
+
+  dropzone.addEventListener("click", function () { fileInput.click(); });
+  fileInput.addEventListener("change", function () {
+    if (fileInput.files.length) handleFile(fileInput.files[0]);
+  });
+  dropzone.addEventListener("dragover", function (e) {
+    e.preventDefault();
+    dropzone.classList.add("dragover");
+  });
+  dropzone.addEventListener("dragleave", function () {
+    dropzone.classList.remove("dragover");
+  });
+  dropzone.addEventListener("drop", function (e) {
+    e.preventDefault();
+    dropzone.classList.remove("dragover");
+    if (e.dataTransfer.files.length) handleFile(e.dataTransfer.files[0]);
+  });
+
+  window.addEventListener("resize", function () {
+    if (currentData) drawChart(currentData);
+  });
+
+  function showError(message) {
+    errorBox.textContent = message;
+    errorBox.style.display = "block";
+    statsSection.style.display = "none";
+    chartSection.style.display = "none";
+    currentData = null;
+  }
+
+  function clearError() {
+    errorBox.style.display = "none";
+    errorBox.textContent = "";
+  }
+
+  function handleFile(file) {
+    fileName.textContent = "Selected file: " + file.name;
+    var reader = new FileReader();
+    reader.onload = function () {
+      try {
+        processCSV(String(reader.result));
+      } catch (err) {
+        showError("Could not read this file: " + err.message);
+      }
+    };
+    reader.onerror = function () {
+      showError("Could not read this file. Please try again.");
+    };
+    reader.readAsText(file);
+  }
+
+  // Minimal CSV parser: handles commas, quoted fields and escaped quotes.
+  function parseCSV(text) {
+    var rows = [];
+    var row = [];
+    var field = "";
+    var inQuotes = false;
+    for (var i = 0; i < text.length; i++) {
+      var c = text[i];
+      if (inQuotes) {
+        if (c === '"') {
+          if (text[i + 1] === '"') { field += '"'; i++; }
+          else inQuotes = false;
+        } else {
+          field += c;
+        }
+      } else if (c === '"') {
+        inQuotes = true;
+      } else if (c === ",") {
+        row.push(field); field = "";
+      } else if (c === "\n") {
+        row.push(field); rows.push(row); row = []; field = "";
+      } else if (c !== "\r") {
+        field += c;
+      }
+    }
+    if (field !== "" || row.length) { row.push(field); rows.push(row); }
+    return rows.filter(function (r) {
+      return !(r.length === 1 && r[0].trim() === "");
+    });
+  }
+
+  function processCSV(text) {
+    clearError();
+
+    var rows = parseCSV(text);
+    if (rows.length < 2) {
+      showError("This file looks empty or has no data rows. Expected a header row plus at least one data row.");
+      return;
+    }
+
+    var headerRaw = rows[0];
+    var header = headerRaw.map(function (h) { return h.trim().toLowerCase(); });
+    var dateIdx = header.indexOf("date");
+    var closeIdx = header.indexOf("close");
+
+    if (dateIdx === -1) {
+      showError("This CSV is missing a \"Date\" column.\nColumns found: " + headerRaw.join(", "));
+      return;
+    }
+    if (closeIdx === -1) {
+      showError("This CSV is missing a \"Close\" column.\nColumns found: " + headerRaw.join(", "));
+      return;
+    }
+
+    var data = [];
+    var skipped = 0;
+    for (var i = 1; i < rows.length; i++) {
+      var d = new Date(rows[i][dateIdx]);
+      var c = parseFloat(rows[i][closeIdx]);
+      if (isNaN(d.getTime()) || isNaN(c)) { skipped++; continue; }
+      data.push({ date: d, close: c });
+    }
+
+    if (data.length === 0) {
+      showError("Found Date and Close columns, but none of the rows contain a valid date and numeric Close value.");
+      return;
+    }
+
+    data.sort(function (a, b) { return a.date - b.date; });
+    currentData = data;
+    renderStats(data, skipped);
+    drawChart(data);
+  }
+
+  function formatDate(d) {
+    return d.toISOString().slice(0, 10);
+  }
+
+  function renderStats(data, skipped) {
+    var closes = data.map(function (p) { return p.close; });
+    var sum = closes.reduce(function (a, b) { return a + b; }, 0);
+    var mean = sum / closes.length;
+    var min = Math.min.apply(null, closes);
+    var max = Math.max.apply(null, closes);
+
+    document.getElementById("statRows").textContent =
+      data.length.toLocaleString() + (skipped ? " (" + skipped + " skipped)" : "");
+    document.getElementById("statRange").textContent =
+      formatDate(data[0].date) + " → " + formatDate(data[data.length - 1].date);
+    document.getElementById("statMean").textContent = mean.toFixed(2);
+    document.getElementById("statMin").textContent = min.toFixed(2);
+    document.getElementById("statMax").textContent = max.toFixed(2);
+
+    statsSection.style.display = "block";
+    chartSection.style.display = "block";
+  }
+
+  function drawChart(data) {
+    var dpr = window.devicePixelRatio || 1;
+    var cssWidth = canvas.clientWidth;
+    var cssHeight = canvas.clientHeight;
+    canvas.width = cssWidth * dpr;
+    canvas.height = cssHeight * dpr;
+
+    var ctx = canvas.getContext("2d");
+    ctx.scale(dpr, dpr);
+    ctx.clearRect(0, 0, cssWidth, cssHeight);
+
+    var pad = { top: 20, right: 20, bottom: 40, left: 64 };
+    var w = cssWidth - pad.left - pad.right;
+    var h = cssHeight - pad.top - pad.bottom;
+
+    var closes = data.map(function (p) { return p.close; });
+    var min = Math.min.apply(null, closes);
+    var max = Math.max.apply(null, closes);
+    var span = max - min || 1;
+    min -= span * 0.05;
+    max += span * 0.05;
+
+    function x(i) { return pad.left + (i / (data.length - 1)) * w; }
+    function y(v) { return pad.top + h - ((v - min) / (max - min)) * h; }
+
+    // Grid lines and Y-axis labels
+    var ticks = 5;
+    ctx.font = "12px system-ui, sans-serif";
+    ctx.fillStyle = "#6b7280";
+    ctx.strokeStyle = "#e5e7eb";
+    ctx.lineWidth = 1;
+    ctx.textAlign = "right";
+    ctx.textBaseline = "middle";
+    for (var t = 0; t <= ticks; t++) {
+      var v = min + ((max - min) * t) / ticks;
+      var yy = y(v);
+      ctx.beginPath();
+      ctx.moveTo(pad.left, yy);
+      ctx.lineTo(pad.left + w, yy);
+      ctx.stroke();
+      ctx.fillText(v.toFixed(2), pad.left - 8, yy);
+    }
+
+    // X-axis date labels (first, middle, last)
+    ctx.textAlign = "center";
+    ctx.textBaseline = "top";
+    var labelIdx = [0, Math.floor((data.length - 1) / 2), data.length - 1];
+    labelIdx.forEach(function (i) {
+      ctx.fillText(formatDate(data[i].date), x(i), pad.top + h + 12);
+    });
+
+    // Axes
+    ctx.strokeStyle = "#9ca3af";
+    ctx.beginPath();
+    ctx.moveTo(pad.left, pad.top);
+    ctx.lineTo(pad.left, pad.top + h);
+    ctx.lineTo(pad.left + w, pad.top + h);
+    ctx.stroke();
+
+    // Price line
+    ctx.strokeStyle = "#2563eb";
+    ctx.lineWidth = 2;
+    ctx.lineJoin = "round";
+    ctx.beginPath();
+    for (var i = 0; i < data.length; i++) {
+      var px = x(i), py = y(data[i].close);
+      if (i === 0) ctx.moveTo(px, py);
+      else ctx.lineTo(px, py);
+    }
+    ctx.stroke();
+  }
+})();
+</script>
+</body>
+</html>
